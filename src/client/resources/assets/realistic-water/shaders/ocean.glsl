@@ -3,42 +3,6 @@
 #define OCEAN_AMP_MAX 1.5
 #define OCEAN_REST 0.8888889
 
-float oceanPhase(int i, vec2 p) {
-    return G.wavePhase[i >> 2][i & 3] + dot(G.waveA[i].xy, p);
-}
-
-float oceanHeight(vec2 p) {
-    float h = 0.0;
-    for (int i = 0; i < OCEAN_GEOMETRIC; i++) {
-        h += G.waveA[i].z * sin(oceanPhase(i, p));
-    }
-    return h;
-}
-
-vec2 oceanSlope(vec2 p, int n) {
-    vec2 g = vec2(0.0);
-    for (int i = 0; i < n; i++) {
-        g += G.waveA[i].xy * (G.waveA[i].z * cos(oceanPhase(i, p)));
-    }
-    return g;
-}
-
-vec2 oceanSlopeFiltered(vec2 p, float amp, float footprint, out float lost) {
-    vec2 g = vec2(0.0);
-    float lostVar = 0.0;
-    for (int i = 0; i < OCEAN_WAVES; i++) {
-        vec4 w = G.waveA[i];
-        float k = length(w.xy);
-        float perPixel = 6.2831853 / max(k * footprint, 1e-6);
-        float fade = smoothstep(2.5, 6.0, perPixel);
-        float slope = amp * w.z * k;
-        g += w.xy * (amp * w.z * fade * cos(oceanPhase(i, p)));
-        lostVar += (1.0 - fade * fade) * slope * slope;
-    }
-    lost = sqrt(lostVar);
-    return g;
-}
-
 float oceanCorner(ivec2 c) {
     uint s = hash(uint(c.x) * 73856093u ^ uint(c.y) * 19349663u);
     return rand(s);
@@ -56,6 +20,82 @@ float oceanNoise(vec2 p) {
     return mix(mix(a, b, f.x), mix(d, e, f.x), f.y);
 }
 
+// Signed 2-octave fBm in [-1, 1] using world-stable coordinates
+float oceanFbm(vec2 p) {
+    float n1 = oceanNoise(p) * 2.0 - 1.0;
+    float n2 = oceanNoise(p * 2.03 + vec2(11.7, -8.3)) * 2.0 - 1.0;
+    return 0.65 * n1 + 0.35 * n2;
+}
+
+// Curves wave crests organically so swells never form infinite parallel grid lines
+vec2 oceanWarp(vec2 p, int i) {
+    vec2 worldP = vec2(G.dims.xz & 4095) + p;
+    float t = G.seaFoam.w * 0.14;
+    float warpScale = (i < OCEAN_GEOMETRIC) ? 2.4 : 0.95;
+    vec2 uv = worldP * 0.031;
+    float wx = oceanFbm(uv + vec2(t, -t * 0.7));
+    float wz = oceanFbm(uv + vec2(37.2 - t * 0.6, 19.8 + t));
+    return p + warpScale * vec2(wx, wz);
+}
+
+// Spatial wave-group envelope [0.58, 1.38] for natural calm patches & rolling sets
+float oceanGust(vec2 p) {
+    vec2 worldP = vec2(G.dims.xz & 4095) + p;
+    float t = G.seaFoam.w * 0.07;
+    float g = oceanFbm(worldP * 0.017 + vec2(t, t * 0.5));
+    return 0.98 + 0.40 * g;
+}
+
+float oceanPhase(int i, vec2 p) {
+    vec2 wp = oceanWarp(p, i);
+    return G.wavePhase[i >> 2][i & 3] + dot(G.waveA[i].xy, wp);
+}
+
+float oceanHeight(vec2 p) {
+    float h = 0.0;
+    float env = oceanGust(p);
+    for (int i = 0; i < OCEAN_GEOMETRIC; i++) {
+        float s = sin(oceanPhase(i, p));
+        // Subtle trochoidal shaping: sharper crests, wider troughs
+        float shaped = s + 0.22 * s * abs(s);
+        h += G.waveA[i].z * shaped;
+    }
+    return h * env;
+}
+
+vec2 oceanSlope(vec2 p, int n) {
+    vec2 g = vec2(0.0);
+    float env = oceanGust(p);
+    for (int i = 0; i < n; i++) {
+        float ph = oceanPhase(i, p);
+        float s = sin(ph);
+        float dShaped = cos(ph) * (1.0 + 0.44 * abs(s));
+        g += G.waveA[i].xy * (G.waveA[i].z * env * dShaped);
+    }
+    return g;
+}
+
+vec2 oceanSlopeFiltered(vec2 p, float amp, float footprint, out float lost) {
+    vec2 g = vec2(0.0);
+    float lostVar = 0.0;
+    float env = oceanGust(p);
+    for (int i = 0; i < OCEAN_WAVES; i++) {
+        vec4 w = G.waveA[i];
+        float k = length(w.xy);
+        float perPixel = 6.2831853 / max(k * footprint, 1e-6);
+        float fade = smoothstep(2.5, 6.0, perPixel);
+        float effAmp = amp * env * w.z;
+        float slope = effAmp * k;
+        float ph = oceanPhase(i, p);
+        float s = sin(ph);
+        float dShaped = cos(ph) * (1.0 + 0.44 * abs(s));
+        g += w.xy * (effAmp * fade * dShaped);
+        lostVar += (1.0 - fade * fade) * slope * slope;
+    }
+    lost = sqrt(lostVar);
+    return g;
+}
+
 float oceanWhitecap(vec2 p, vec2 world, float amp) {
     if (G.seaFoam.x <= 0.0 || amp <= 0.0) {
         return 0.0;
@@ -63,6 +103,7 @@ float oceanWhitecap(vec2 p, vec2 world, float amp) {
     float h = 0.0;
     float trail = 0.0;
     float sumA = 0.0;
+    float env = oceanGust(p);
     for (int i = 0; i < OCEAN_GEOMETRIC; i++) {
         float a = G.waveA[i].z;
         float phase = oceanPhase(i, p);
@@ -70,7 +111,7 @@ float oceanWhitecap(vec2 p, vec2 world, float amp) {
         trail += a * sin(phase + 0.9);
         sumA += a;
     }
-    float height = amp * sumA;
+    float height = amp * env * sumA;
     float start = max(G.seaFoam.z, 0.05);
     float big = smoothstep(start, start * 2.5, height);
     if (big <= 0.0) {
@@ -93,11 +134,12 @@ float seaMaterialAlpha(float rough, float whitecap) {
 
 vec3 oceanVelocity(vec2 p, float depth) {
     vec3 u = vec3(0.0);
+    float env = oceanGust(p);
     for (int i = 0; i < OCEAN_GEOMETRIC; i++) {
         vec4 w = G.waveA[i];
         float k = length(w.xy);
         float phase = oceanPhase(i, p);
-        float e = w.z * w.w * exp(k * min(depth, 0.0));
+        float e = w.z * env * w.w * exp(k * min(depth, 0.0));
         vec2 dir = w.xy / max(k, 1e-6);
         u.xz += dir * (e * sin(phase));
         u.y -= e * cos(phase);
