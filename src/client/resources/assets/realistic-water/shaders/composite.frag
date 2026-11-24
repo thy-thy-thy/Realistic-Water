@@ -333,7 +333,9 @@ vec3 shadeStyle2Water(vec2 uv, vec3 P, vec3 V, vec3 n, float fd, float footprint
     }
     vec2 offset = n.xy * G.waterA.z * clamp(thickness, 0.0, 2.0) / max(fd, 1.0);
     vec2 probe = clamp(uv + offset, vec2(0.0), vec2(1.0));
-    float keep = smoothstep(0.0, 0.5, linearDepth(texture(sceneDepth, probe).r) - fd) * smoothstep(0.0, 0.05, thicknessAt(probe));
+    float keep = pc.sea > 0.5
+        ? smoothstep(0.0, 0.5, linearDepth(texture(sceneDepth, probe).r) - fd)
+        : smoothstep(0.0, 0.5, linearDepth(texture(sceneDepth, probe).r) - fd) * smoothstep(0.0, 0.05, thicknessAt(probe));
     vec2 ruv = clamp(uv + offset * keep, vec2(0.0), vec2(1.0));
     if (linearDepth(texture(sceneDepth, ruv).r) < fd) {
         ruv = uv;
@@ -341,7 +343,7 @@ vec3 shadeStyle2Water(vec2 uv, vec3 P, vec3 V, vec3 n, float fd, float footprint
     vec3 lightColor = vanillaLight(bs);
     vec3 under = behindAt(ruv) * mix(1.0, 0.9, smoothstep(0.0, 0.01, path));
     vec3 deep = STYLE2_DEEP * gSeaRatio * max(lightColor, vec3(0.06));
-    vec3 water = mix(under * exp(-STYLE2_ABSORB / gSeaRatio * path), deep, 1.0 - exp(-0.05 * path));
+    vec3 water = mix(under * exp(-STYLE2_ABSORB / gSeaRatio * path), deep, 1.0 - exp(-0.08 * path));
     if (G.compat.w > 0.0) {
         vec3 tint = gSeaWater.r >= 0.0 ? gSeaWater * VANILLA_WATER_TEXTURE * lightColor : STYLE2_DEEP / STYLE2_DEEP.b * 0.6 * lightColor;
         water = mix(water, tint, G.compat.w);
@@ -358,8 +360,9 @@ vec3 shadeStyle2Water(vec2 uv, vec3 P, vec3 V, vec3 n, float fd, float footprint
     float NoV = max(dot(n, V), 0.0);
     float body = pc.sea > 0.5 ? 1.0
         : smoothstep(0.0, 0.03, thickness) * mix(0.35, 1.0, smoothstep(0.05, 0.6, thickness * max(NoV, 0.1)));
-    float F = (0.02 + (max(1.0 - lostRough, 0.02) - 0.02) * pow(1.0 - NoV, 5.0)) * body;
-    vec3 color = mix(water, reflection, F);
+    // Stronger BSL-like grazing Fresnel curve so ocean mirrors cliffs & sky smoothly
+    float F = (0.025 + (max(1.0 - lostRough, 0.025) - 0.025) * pow(1.0 - NoV, 4.2)) * body;
+    vec3 color = mix(water, reflection, clamp(F, 0.0, 0.96));
 
     vec3 L = normalize(G.sunDir.xyz);
     if (dot(n, L) > 0.0 && G.sunDir.w > 0.0) {
@@ -379,7 +382,9 @@ vec3 shadeAboveWater(vec2 uv, vec3 n, float fd, float sceneDist, float ambient, 
     vec3 V = normalize(-P);
     n = dot(n, V) < 0.0 ? -n : n;
     float footprint = pixelFootprint(fd);
-    float thickness = clamp(thicknessAt(uv), 0.0, max(sceneDist - fd, 0.0));
+    float rawThickness = clamp(thicknessAt(uv), 0.0, max(sceneDist - fd, 0.0));
+    // Eliminate the air-pocket gap on ocean surfaces by falling back to geometric depth (sceneDist - fd)
+    float thickness = pc.sea > 0.5 ? max(rawThickness, max(sceneDist - fd, 0.0)) : rawThickness;
     vec3 upV = normalize(mat3(G.view) * vec3(0.0, 1.0, 0.0));
     float vertical = thickness * abs(dot(V, upV));
     float film = (1.0 - smoothstep(0.02, max(G.shadeB.z, 0.03), vertical)) * smoothstep(0.2, 0.6, dot(n, upV));
@@ -399,7 +404,8 @@ vec3 shadeAboveWater(vec2 uv, vec3 n, float fd, float sceneDist, float ambient, 
     vec2 offset = n.xy * G.waterA.z * clamp(thickness, 0.0, 2.0) / max(fd, 1.0);
     vec2 ruv = clamp(uv + offset, vec2(0.0), vec2(1.0));
     float refrDist = linearDepth(texture(sceneDepth, ruv).r);
-    float path = clamp(thicknessAt(ruv), 0.0, max(refrDist - fd, 0.0));
+    float refrRaw = clamp(thicknessAt(ruv), 0.0, max(refrDist - fd, 0.0));
+    float path = pc.sea > 0.5 ? max(refrRaw, max(refrDist - fd, 0.0)) : refrRaw;
     if (refrDist < fd) {
         ruv = uv;
         path = thickness;
@@ -423,9 +429,11 @@ vec3 shadeAboveWater(vec2 uv, vec3 n, float fd, float sceneDist, float ambient, 
     float hit;
     vec3 ssr = traceReflection(P + n * 0.05, Rv, hit);
     float skyVisible = smoothstep(0.0, 0.7, bs.y);
-    vec3 reflection = mix(skyColor(Rw) * mix(lightColor * 0.3, vec3(1.0), skyVisible), ssr, hit);
-    float F = 0.02 + (max(1.0 - lostRough, 0.02) - 0.02) * pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 5.0);
-    return mix(water, reflection, F) + sunSpecular(n, V, footprint, lostRough) * smoothstep(0.5, 0.95, bs.y);
+    vec3 horizonSky = mix(skyColor(Rw), mix(G.fogColor.rgb, G.skyColor.rgb, 0.35), 0.35);
+    vec3 reflection = mix(horizonSky * mix(lightColor * 0.3, vec3(1.0), skyVisible), ssr, hit);
+    float NoV = clamp(dot(n, V), 0.0, 1.0);
+    float F = 0.025 + (max(1.0 - lostRough, 0.025) - 0.025) * pow(1.0 - NoV, 4.2);
+    return mix(water, reflection, clamp(F, 0.0, 0.96)) + sunSpecular(n, V, footprint, lostRough) * smoothstep(0.5, 0.95, bs.y);
 }
 
 float hash3(ivec3 c) {
