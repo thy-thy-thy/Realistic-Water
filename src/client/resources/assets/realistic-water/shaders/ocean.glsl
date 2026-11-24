@@ -8,26 +8,42 @@ float oceanCorner(ivec2 c) {
     return rand(s);
 }
 
+// Quintic C2 smooth interpolation removes grid-aligned normal ridges at close range
 float oceanNoise(vec2 p) {
     vec2 i = floor(p);
     vec2 f = p - i;
-    f = f * f * (3.0 - 2.0 * f);
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     ivec2 c = ivec2(i);
     float a = oceanCorner(c);
     float b = oceanCorner(c + ivec2(1, 0));
     float d = oceanCorner(c + ivec2(0, 1));
     float e = oceanCorner(c + ivec2(1, 1));
-    return mix(mix(a, b, f.x), mix(d, e, f.x), f.y);
+    return mix(mix(a, b, u.x), mix(d, e, u.x), u.y);
 }
 
-// Signed 2-octave fBm in [-1, 1] using world-stable coordinates
+// Analytical gradient of oceanNoise so micro-ripples have silky, non-blocky normals
+vec2 oceanNoiseGrad(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = p - i;
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+    ivec2 c = ivec2(i);
+    float a = oceanCorner(c);
+    float b = oceanCorner(c + ivec2(1, 0));
+    float d = oceanCorner(c + ivec2(0, 1));
+    float e = oceanCorner(c + ivec2(1, 1));
+    float k1 = b - a;
+    float k2 = d - a;
+    float k3 = a - b - d + e;
+    return vec2(k1 + k3 * u.y, k2 + k3 * u.x) * du;
+}
+
 float oceanFbm(vec2 p) {
     float n1 = oceanNoise(p) * 2.0 - 1.0;
     float n2 = oceanNoise(p * 2.03 + vec2(11.7, -8.3)) * 2.0 - 1.0;
     return 0.65 * n1 + 0.35 * n2;
 }
 
-// Curves wave crests organically so swells never form infinite parallel grid lines
 vec2 oceanWarp(vec2 p, int i) {
     vec2 worldP = vec2(G.dims.xz & 4095) + p;
     float t = G.seaFoam.w * 0.14;
@@ -38,7 +54,6 @@ vec2 oceanWarp(vec2 p, int i) {
     return p + warpScale * vec2(wx, wz);
 }
 
-// Spatial wave-group envelope [0.58, 1.38] for natural calm patches & rolling sets
 float oceanGust(vec2 p) {
     vec2 worldP = vec2(G.dims.xz & 4095) + p;
     float t = G.seaFoam.w * 0.07;
@@ -56,7 +71,6 @@ float oceanHeight(vec2 p) {
     float env = oceanGust(p);
     for (int i = 0; i < OCEAN_GEOMETRIC; i++) {
         float s = sin(oceanPhase(i, p));
-        // Subtle trochoidal shaping: sharper crests, wider troughs
         float shaped = s + 0.22 * s * abs(s);
         h += G.waveA[i].z * shaped;
     }
@@ -75,6 +89,25 @@ vec2 oceanSlope(vec2 p, int n) {
     return g;
 }
 
+// BSL-style rotated, anisotropic dual-layer capillary ripples for crisp horizontal glints
+vec2 oceanCapillarySlope(vec2 p, float amp, float footprint) {
+    vec2 worldP = vec2(G.dims.xz & 4095) + p;
+    float t = G.seaFoam.w;
+    // Rotate & stretch along wave crests so highlights form silky horizontal bands
+    mat2 rot1 = mat2(0.84, -0.54, 0.54, 0.84);
+    mat2 rot2 = mat2(0.42, 0.91, -0.91, 0.42);
+    vec2 uv1 = (rot1 * worldP) * vec2(0.85, 2.35) + vec2(t * 0.35, -t * 0.22);
+    vec2 uv2 = (rot2 * worldP) * vec2(1.45, 3.80) + vec2(-t * 0.28, t * 0.41);
+
+    float fade1 = smoothstep(1.2, 3.5, 1.0 / max(footprint * 0.85, 1e-4));
+    float fade2 = smoothstep(1.2, 3.5, 1.0 / max(footprint * 1.45, 1e-4));
+    float strength = mix(0.035, 0.095, clamp(amp / OCEAN_AMP_MAX, 0.0, 1.0));
+
+    vec2 g1 = (transpose(rot1) * (oceanNoiseGrad(uv1) * vec2(0.85, 2.35))) * fade1;
+    vec2 g2 = (transpose(rot2) * (oceanNoiseGrad(uv2) * vec2(1.45, 3.80))) * fade2;
+    return (g1 * 0.65 + g2 * 0.45) * strength;
+}
+
 vec2 oceanSlopeFiltered(vec2 p, float amp, float footprint, out float lost) {
     vec2 g = vec2(0.0);
     float lostVar = 0.0;
@@ -83,7 +116,7 @@ vec2 oceanSlopeFiltered(vec2 p, float amp, float footprint, out float lost) {
         vec4 w = G.waveA[i];
         float k = length(w.xy);
         float perPixel = 6.2831853 / max(k * footprint, 1e-6);
-        float fade = smoothstep(2.5, 6.0, perPixel);
+        float fade = smoothstep(1.8, 4.8, perPixel);
         float effAmp = amp * env * w.z;
         float slope = effAmp * k;
         float ph = oceanPhase(i, p);
@@ -92,6 +125,7 @@ vec2 oceanSlopeFiltered(vec2 p, float amp, float footprint, out float lost) {
         g += w.xy * (effAmp * fade * dShaped);
         lostVar += (1.0 - fade * fade) * slope * slope;
     }
+    g += oceanCapillarySlope(p, amp, footprint);
     lost = sqrt(lostVar);
     return g;
 }
