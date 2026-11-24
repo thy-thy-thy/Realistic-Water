@@ -2,7 +2,6 @@ package me.skaffy.client.water;
 
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.longs.Long2FloatOpenHashMap;
-import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongIterator;
 import it.unimi.dsi.fastutil.longs.LongLinkedOpenHashSet;
@@ -27,8 +26,8 @@ import org.jspecify.annotations.Nullable;
 final class OceanSurfaces implements AutoCloseable {
 	static final int ENTRY_INTS = 8;
 	static final int KIND_TOP = 0;
-	private static final long SCAN_BUDGET_NANOS = 2_000_000L;
-	private static final int UPLOAD_INTERVAL = 15;
+	private static final long SCAN_BUDGET_NANOS = 4_500_000L;
+	private static final int UPLOAD_INTERVAL = 4;
 	private static final int NO_TOP = Integer.MIN_VALUE;
 	private static final Direction[] SIDES = {Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST};
 
@@ -86,10 +85,15 @@ final class OceanSurfaces implements AutoCloseable {
 
 	void chunkLoaded(int cx, int cz) {
 		this.dirty.add(ChunkPos.pack(cx, cz));
-		for (Direction d : SIDES) {
-			long key = ChunkPos.pack(cx + d.getStepX(), cz + d.getStepZ());
-			if (this.chunks.containsKey(key)) {
-				this.dirty.add(key);
+		for (int dz = -1; dz <= 1; dz++) {
+			for (int dx = -1; dx <= 1; dx++) {
+				if (dx == 0 && dz == 0) {
+					continue;
+				}
+				long key = ChunkPos.pack(cx + dx, cz + dz);
+				if (this.chunks.containsKey(key)) {
+					this.dirty.add(key);
+				}
 			}
 		}
 	}
@@ -233,6 +237,9 @@ final class OceanSurfaces implements AutoCloseable {
 			}
 			this.colorBuffer.mapped().asIntBuffer().put(0, this.colors);
 			this.colorBuffer.flush(0, (long) this.colors.length * 4L);
+			if (!this.changed) {
+				this.framesSinceUpload = 0;
+			}
 		}
 		if (this.changed && this.framesSinceUpload >= UPLOAD_INTERVAL) {
 			this.changed = false;
@@ -319,109 +326,107 @@ final class OceanSurfaces implements AutoCloseable {
 		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 		int bx = chunk.getPos().x() << 4;
 		int bz = chunk.getPos().z() << 4;
-		for (int s = 0; s < sections.length; s++) {
-			LevelChunkSection section = sections[s];
-			if (section.hasOnlyAir() || !section.maybeHas(OceanWaves::isRestWater)) {
-				continue;
-			}
-			int baseY = (level.getMinSectionY() + s) << 4;
-			for (int i = 0; i < 4096; i++) {
-				int lx = i & 15;
-				int ly = (i >> 4) & 15;
-				int lz = i >> 8;
-				BlockState state = section.getBlockState(lx, ly, lz);
-				if (!OceanWaves.isRestWater(state)) {
-					continue;
-				}
-				int x = bx + lx;
-				int y = baseY + ly;
-				int z = bz + lz;
-				BlockState above = states.get(x, y + 1, z);
-				if (OceanWaves.isRestWater(above) || above.isSolidRender()) {
-					continue;
-				}
-				float self = height(states, x, y, z);
-				float hN = height(states, x, y, z - 1);
-				float hS = height(states, x, y, z + 1);
-				float hW = height(states, x - 1, y, z);
-				float hE = height(states, x + 1, y, z);
-				float nw = corner(states, self, hN, hW, x - 1, y, z - 1);
-				float sw = corner(states, self, hS, hW, x - 1, y, z + 1);
-				float se = corner(states, self, hS, hE, x + 1, y, z + 1);
-				float ne = corner(states, self, hN, hE, x + 1, y, z - 1);
-				if (self >= 1.0F) {
-					nw = sw = se = ne = 1.0F;
-				}
-				float c00 = columnAmp(level, states, ampCache, pos, x - 1, y, z - 1);
-				float c10 = columnAmp(level, states, ampCache, pos, x, y, z - 1);
-				float c20 = columnAmp(level, states, ampCache, pos, x + 1, y, z - 1);
-				float c01 = columnAmp(level, states, ampCache, pos, x - 1, y, z);
-				float c11 = columnAmp(level, states, ampCache, pos, x, y, z);
-				float c21 = columnAmp(level, states, ampCache, pos, x + 1, y, z);
-				float c02 = columnAmp(level, states, ampCache, pos, x - 1, y, z + 1);
-				float c12 = columnAmp(level, states, ampCache, pos, x, y, z + 1);
-				float c22 = columnAmp(level, states, ampCache, pos, x + 1, y, z + 1);
-				float aNW = Math.min(Math.min(c00, c10), Math.min(c01, c11));
-				float aNE = Math.min(Math.min(c10, c20), Math.min(c11, c21));
-				float aSW = Math.min(Math.min(c01, c11), Math.min(c02, c12));
-				float aSE = Math.min(Math.min(c11, c21), Math.min(c12, c22));
-				pos.set(x, y + 1, z);
-				int light = level.getBrightness(LightLayer.BLOCK, pos) | level.getBrightness(LightLayer.SKY, pos) << 4;
-				Vec3 flow = state.getFluidState().getFlow(level, pos.set(x, y, z));
-				int heights = packBytes(nw, sw, se, ne);
-				int amp = packBytes(aNW / OceanWaves.AMP_MAX, aSW / OceanWaves.AMP_MAX, aSE / OceanWaves.AMP_MAX, aNE / OceanWaves.AMP_MAX);
-				add(out, x, y, z, light, KIND_TOP, heights, amp, (float) flow.x, (float) flow.z);
-				for (int k = 0; k < SIDES.length; k++) {
-					Direction d = SIDES[k];
-					BlockState side = states.get(x + d.getStepX(), y, z + d.getStepZ());
-					if (!OceanWaves.isRestWater(side) && !side.isSolidRender()) {
-						add(out, x, y, z, light, k + 1, heights, amp, 0.0F, 0.0F);
-					}
-				}
-				int column = lx | lz << 4;
-				if (y > tops[column] || tops[column] == NO_TOP) {
-					tops[column] = y;
-					amps[column] = c11;
-				}
-			}
-		}
-		if (out.isEmpty()) {
-			return null;
-		}
-		Chunk c = new Chunk(out.toIntArray());
-		System.arraycopy(tops, 0, c.tops, 0, 256);
-		System.arraycopy(amps, 0, c.amps, 0, 256);
-		return c;
-	}
-
-	private static float columnAmp(ClientLevel level, OceanWaves.States states, Long2FloatOpenHashMap cache, BlockPos.MutableBlockPos pos, int x, int y,
-		int z) {
-		long key = BlockPos.asLong(x, y, z);
-		if (cache.containsKey(key)) {
-			return cache.get(key);
-		}
-		float amp = 0.0F;
-		if (OceanWaves.isWaveSurface(states.get(x, y, z), states.get(x, y + 1, z))) {
-			amp = OceanWaves.columnAmplitude(states, x, y, z, OceanWaves.biomeFactor(level.getBiome(pos.set(x, y, z))));
-			amp = Math.round(Math.min(amp, OceanWaves.AMP_MAX) / OceanWaves.AMP_MAX * 31.0F) / 31.0F * OceanWaves.AMP_MAX;
-		}
-		cache.put(key, amp);
-		return amp;
-	}
-
-	private static void add(IntArrayList out, int x, int y, int z, int light, int kind, int heights, int amp, float flowX, float flowZ) {
-		out.add(x);
-		out.add(z);
-		out.add((y + 32768) & 0xFFFF | (light & 0xFF) << 16 | kind << 24);
-		out.add(heights);
-		out.add(amp);
-		out.add(Float.floatToRawIntBits(flowX));
-		out.add(Float.floatToRawIntBits(flowZ));
-		out.add(0);
-	}
-
-	@Override
-	public void close() {
-		this.clear();
-	}
+Use code with caution.
+for (int s = 0; s < sections.length; s++) {
+LevelChunkSection section = sections[s];
+if (section.hasOnlyAir() || !section.maybeHas(OceanWaves::isRestWater)) {
+continue;
+}
+int baseY = (level.getMinSectionY() + s) << 4;
+for (int i = 0; i < 4096; i++) {
+int lx = i & 15;
+int ly = (i >> 4) & 15;
+int lz = i >> 8;
+BlockState state = section.getBlockState(lx, ly, lz);
+if (!OceanWaves.isRestWater(state)) {
+continue;
+}
+int x = bx + lx;
+int y = baseY + ly;
+int z = bz + lz;
+BlockState above = states.get(x, y + 1, z);
+if (OceanWaves.isRestWater(above) || above.isSolidRender()) {
+continue;
+}
+float self = height(states, x, y, z);
+float hN = height(states, x, y, z - 1);
+float hS = height(states, x, y, z + 1);
+float hW = height(states, x - 1, y, z);
+float hE = height(states, x + 1, y, z);
+float nw = corner(states, self, hN, hW, x - 1, y, z - 1);
+float sw = corner(states, self, hS, hW, x - 1, y, z + 1);
+float se = corner(states, self, hS, hE, x + 1, y, z + 1);
+float ne = corner(states, self, hN, hE, x + 1, y, z - 1);
+if (self >= 1.0F) {
+nw = sw = se = ne = 1.0F;
+}
+float c00 = columnAmp(level, states, ampCache, pos, x - 1, y, z - 1);
+float c10 = columnAmp(level, states, ampCache, pos, x, y, z - 1);
+float c20 = columnAmp(level, states, ampCache, pos, x + 1, y, z - 1);
+float c01 = columnAmp(level, states, ampCache, pos, x - 1, y, z);
+float c11 = columnAmp(level, states, ampCache, pos, x, y, z);
+float c21 = columnAmp(level, states, ampCache, pos, x + 1, y, z);
+float c02 = columnAmp(level, states, ampCache, pos, x - 1, y, z + 1);
+float c12 = columnAmp(level, states, ampCache, pos, x, y, z + 1);
+float c22 = columnAmp(level, states, ampCache, pos, x + 1, y, z + 1);
+float aNW = Math.min(Math.min(c00, c10), Math.min(c01, c11));
+float aNE = Math.min(Math.min(c10, c20), Math.min(c11, c21));
+float aSW = Math.min(Math.min(c01, c11), Math.min(c02, c12));
+float aSE = Math.min(Math.min(c11, c21), Math.min(c12, c22));
+pos.set(x, y + 1, z);
+int light = level.getBrightness(LightLayer.BLOCK, pos) | level.getBrightness(LightLayer.SKY, pos) << 4;
+Vec3 flow = state.getFluidState().getFlow(level, pos.set(x, y, z));
+int heights = packBytes(nw, sw, se, ne);
+int amp = packBytes(aNW / OceanWaves.AMP_MAX, aSW / OceanWaves.AMP_MAX, aSE / OceanWaves.AMP_MAX, aNE / OceanWaves.AMP_MAX);
+add(out, x, y, z, light, KIND_TOP, heights, amp, (float) flow.x, (float) flow.z);
+for (int k = 0; k < SIDES.length; k++) {
+Direction d = SIDES[k];
+BlockState side = states.get(x + d.getStepX(), y, z + d.getStepZ());
+if (!OceanWaves.isRestWater(side) && !side.isSolidRender()) {
+add(out, x, y, z, light, k + 1, heights, amp, 0.0F, 0.0F);
+}
+}
+int column = lx | lz << 4;
+if (y > tops[column] || tops[column] == NO_TOP) {
+tops[column] = y;
+amps[column] = c11;
+}
+}
+}
+if (out.isEmpty()) {
+return null;
+}
+Chunk c = new Chunk(out.toIntArray());
+System.arraycopy(tops, 0, c.tops, 0, 256);
+System.arraycopy(amps, 0, c.amps, 0, 256);
+return c;
+}
+private static float columnAmp(ClientLevel level, OceanWaves.States states, Long2FloatOpenHashMap cache, BlockPos.MutableBlockPos pos, int x, int y,
+int z) {
+long key = BlockPos.asLong(x, y, z);
+if (cache.containsKey(key)) {
+return cache.get(key);
+}
+float amp = 0.0F;
+if (OceanWaves.isWaveSurface(states.get(x, y, z), states.get(x, y + 1, z))) {
+amp = OceanWaves.columnAmplitude(states, x, y, z, OceanWaves.biomeFactor(level.getBiome(pos.set(x, y, z))));
+amp = Math.round(Math.min(amp, OceanWaves.AMP_MAX) / OceanWaves.AMP_MAX * 31.0F) / 31.0F * OceanWaves.AMP_MAX;
+}
+cache.put(key, amp);
+return amp;
+}
+private static void add(IntArrayList out, int x, int y, int z, int light, int kind, int heights, int amp, float flowX, float flowZ) {
+out.add(x);
+out.add(z);
+out.add((y + 32768) & 0xFFFF | (light & 0xFF) << 16 | kind << 24);
+out.add(heights);
+out.add(amp);
+out.add(Float.floatToRawIntBits(flowX));
+out.add(Float.floatToRawIntBits(flowZ));
+out.add(0);
+}
+@Override
+public void close() {
+this.clear();
+}
 }
