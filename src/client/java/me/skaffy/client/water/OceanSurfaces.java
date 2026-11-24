@@ -326,7 +326,6 @@ final class OceanSurfaces implements AutoCloseable {
 		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 		int bx = chunk.getPos().x() << 4;
 		int bz = chunk.getPos().z() << 4;
-Use code with caution.
 for (int s = 0; s < sections.length; s++) {
 LevelChunkSection section = sections[s];
 if (section.hasOnlyAir() || !section.maybeHas(OceanWaves::isRestWater)) {
