@@ -30,7 +30,9 @@
 		"compat.VitrailShadowGeometryMixin",
 		"compat.VitrailSodiumVertexMixin",
 		"compat.VitrailTranslationCacheMixin",
-		"compat.VitrailWorldValuesMixin"
+		"compat.VitrailWorldValuesMixin",
+		"BannerRendererMixin",
+		"CapeLayerMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
