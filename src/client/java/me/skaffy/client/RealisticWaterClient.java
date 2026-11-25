@@ -66,6 +66,7 @@ public class RealisticWaterClient implements ClientModInitializer {
 		ClientCommandRegistrationCallback.EVENT.register(WaterCommands::register);
 		ClientTickEvents.START_CLIENT_TICK.register(OceanMode::tick);
 		ClientTickEvents.END_CLIENT_TICK.register(water::tick);
+		ClientTickEvents.END_CLIENT_TICK.register(me.skaffy.client.cloth.ClothManager::tick);
 		ClientTickEvents.END_CLIENT_TICK.register(WaterSettingsScreen::tick);
 		ClientTickEvents.START_CLIENT_TICK.register(ClientBodies::startTick);
 		ClientTickEvents.END_CLIENT_TICK.register(ClientBodies::endTick);
