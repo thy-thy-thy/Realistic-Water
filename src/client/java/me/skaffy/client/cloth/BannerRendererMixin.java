@@ -22,19 +22,13 @@ import net.minecraft.world.level.block.entity.BannerPatternLayers;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4fc;
 import org.joml.Vector3f;
-import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(BannerRenderer.class)
 public abstract class BannerRendererMixin {
-	@Shadow
-	@Final
-	private SpriteGetter materials;
-
 	@Inject(
 		method = "submit(Lnet/minecraft/client/renderer/blockentity/state/BannerRenderState;Lcom/mojang/blaze3d/vertex/PoseStack;Lnet/minecraft/client/renderer/SubmitNodeCollector;Lnet/minecraft/client/renderer/state/level/CameraRenderState;)V",
 		at = @At("HEAD"),
@@ -55,7 +49,6 @@ public abstract class BannerRendererMixin {
 		BlockPos pos = state.blockPos;
 		boolean ground = state.attachmentType == BannerBlock.AttachmentType.GROUND;
 
-		// Transform banner top-bar endpoints directly from BannerRenderState's exact Transformation matrix
 		Matrix4fc mat = state.transformation.getMatrix();
 		float barY = ground ? 1.82F : 1.48F;
 		float barZ = ground ? 0.08F : -0.36F;
@@ -73,7 +66,7 @@ public abstract class BannerRendererMixin {
 		int light = state.lightCoords;
 		DyeColor baseColor = state.baseColor;
 		BannerPatternLayers patterns = state.patterns;
-		SpriteGetter sprites = this.materials;
+		SpriteGetter sprites = Minecraft.getInstance().getAtlasManager();
 
 		collector.submitCustomGeometry(poseStack, RenderTypes.entitySolid(Sheets.BANNER_SHEET), (pose, consumer) -> {
 			PoseStack localStack = new PoseStack();
